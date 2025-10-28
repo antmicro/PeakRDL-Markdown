@@ -129,6 +129,27 @@ class MarkdownExporter:  # pylint: disable=too-few-public-methods
             name = name.replace("\n", "")
         return name
 
+    def _get_node_inst_identifier(self, node):
+        """Create a unique identifier for a given node."""
+        name = None
+        for currnode in MarkdownExporter._get_node_path(node):
+            part = currnode.inst_name
+            if (
+                currnode.is_array
+                and not self.use_formulas
+                and hasattr(currnode, "current_idx")
+            ):
+                part += "-" + str(currnode.current_idx)
+            if (
+                currnode.is_array
+                and self.use_formulas
+                and hasattr(currnode, "n_elements")
+            ):
+                part += "-" + str(currnode.n_elements)
+            name = ".".join([name, part]) if name else part
+            currnode = currnode.parent
+        return name
+
     def _addrnode_info(self, node: AddressableNode):
         """Generate AddressableNode basic information dictionary."""
         ret = OrderedDict()
@@ -210,7 +231,9 @@ class MarkdownExporter:  # pylint: disable=too-few-public-methods
 
         table_row: "OrderedDict[str, Union[str, int]]" = OrderedDict()
         table_row["Offset"] = offset
-        table_row["Identifier"] = identifier
+        table_row["Identifier"] = (
+            f"[{identifier}]({self._get_node_inst_identifier(node)}_ref)"
+        )
         table_row["Name"] = name
         table_row["Size"] = f"0x{size:X}"
 
@@ -296,6 +319,7 @@ class MarkdownExporter:  # pylint: disable=too-few-public-methods
                     or not child.is_array
                     or not any(child.current_idx)
                 ):
+                    member_gen += f"\n({self._get_node_inst_identifier(child)}_ref)="
                     member_gen += output.generated
                 members.append(output)
             elif isinstance(child, RegNode):
@@ -305,6 +329,7 @@ class MarkdownExporter:  # pylint: disable=too-few-public-methods
                     or not child.is_array
                     or not any(child.current_idx)
                 ):
+                    member_gen += f"\n({self._get_node_inst_identifier(child)}_ref)="
                     member_gen += output.generated
                 members.append(output)
             else:
