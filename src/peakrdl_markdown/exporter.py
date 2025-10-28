@@ -3,6 +3,7 @@
 __authors__ = [
     "Marek Pikuła <marek at serenitycode.dev>",
     "Maciej Dudek <mdudek at antmicro.com>",
+    "Grzegorz Latosinski <glatosinski at antmicro.com>",
 ]
 
 from collections import OrderedDict
@@ -43,6 +44,66 @@ class MarkdownExporter:  # pylint: disable=too-few-public-methods
         """Markdown generated during this stage."""
 
     @staticmethod
+    def _get_node_path(node):
+        """Provide the current node and all parent nodes."""
+        currnode = node
+        nodepath = []
+        while not isinstance(currnode, RootNode):
+            nodepath.append(currnode)
+            currnode = currnode.parent
+        return nodepath[::-1]
+
+    @staticmethod
+    def _is_node_array_based(node):
+        """Return True if node or any of its parents is an array."""
+        currnode = node
+        while not isinstance(currnode, RootNode):
+            if currnode.is_array:
+                return True
+            currnode = currnode.parent
+        return False
+
+    @staticmethod
+    def _generate_absaddr_formula(node: AddressableNode):
+        """Create a formula for calculating an absolute address."""
+        formula = []
+        formula_left = []
+        formula_right = []
+        arrid = 0
+        for currnode in MarkdownExporter._get_node_path(node):
+            formula_left.append(currnode.inst_name)
+            if currnode.raw_address_offset != 0:
+                formula_right.append(f"0x{currnode.raw_address_offset:X}")
+            partial_component = currnode.inst_name
+            partial_offset = f"0x{currnode.raw_address_offset:X}"
+            if currnode.is_array:
+                arr_vars = []
+                for pos, idx in enumerate(currnode.current_idx):
+                    stride_mult = [f"**i{arrid}**"]
+                    for dimpos in range(pos + 1, len(currnode.array_dimensions)):
+                        stride_mult.append(str(currnode.array_dimensions[dimpos]))
+                    stride_mult.append(f"0x{currnode.array_stride:X}")
+                    stride_mult_md = " * ".join(stride_mult)
+                    arr_vars.append(
+                        f"**i{arrid}**=[0, {currnode.array_dimensions[pos] - 1}]"
+                    )
+                    partial_component += f"[**i{arrid}**]"
+                    partial_offset += f" + {stride_mult_md}"
+                    formula_left[-1] += f"[i{arrid}]"
+                    formula_right.append(stride_mult_md.replace("**", ""))
+                    arrid += 1
+                partial_component += "<br/>" + "<br/>".join(arr_vars)
+            formula.append(
+                {"Offset source": partial_component, "Offset": partial_offset}
+            )
+        return (
+            f"```\n{'.'.join(formula_left)} = {' + '.join(formula_right)}\n```\n"
+            + markdownTable(formula)
+            .setParams(row_sep="markdown", quote=False)
+            .getMarkdown()
+        )
+
+    @staticmethod
     def _heading(depth: int, title: str):
         """Generate Markdown heading of a given depth with newline envelope.
 
@@ -56,15 +117,33 @@ class MarkdownExporter:  # pylint: disable=too-few-public-methods
         return "\n" + "#" * depth + f" {title}\n\n"
 
     @staticmethod
-    def _addrnode_info(node: AddressableNode):
+    def _node_name_sanitized(node: Node) -> str:
+        """Get the Node name as HTML without newlines.
+
+        Needed for proper inclusion in tables.
+        """
+        name = node.get_html_name()
+        if name is None:
+            name = "—"
+        else:
+            name = name.replace("\n", "")
+        return name
+
+    def _addrnode_info(self, node: AddressableNode):
         """Generate AddressableNode basic information dictionary."""
-        ret: "OrderedDict[str, str]" = OrderedDict()
+        ret = OrderedDict()
 
         set_index = False
         if node.is_array and node.current_idx is None:
             node.current_idx = [0]
             set_index = True
-        ret["Absolute Address"] = f"0x{node.absolute_address:X}"
+
+        if self.use_formulas and self._is_node_array_based(node):
+            absaddr_table = self._generate_absaddr_formula(node).replace("\n", "\n  ")
+            ret["Absolute Address"] = f"\n  {absaddr_table}\n"
+        else:
+            ret["Absolute Address"] = f"0x{node.absolute_address:X}"
+
         ret["Base Offset"] = f"0x{node.raw_address_offset:X}"
         if node.is_array and node.array_dimensions is not None and set_index:
             ret["Size"] = f"0x{node.size * reduce(mul, node.array_dimensions, 1):X}"
@@ -83,19 +162,6 @@ class MarkdownExporter:  # pylint: disable=too-few-public-methods
         return "- " + "\n- ".join(
             f"{key}: {value}" for key, value in self._addrnode_info(node).items()
         )
-
-    @staticmethod
-    def _node_name_sanitized(node: Node) -> str:
-        """Get the Node name as HTML without newlines.
-
-        Needed for proper inclusion in tables.
-        """
-        name = node.get_html_name()
-        if name is None:
-            name = "—"
-        else:
-            name = name.replace("\n", "")
-        return name
 
     def _addrnode_header(
         self, node: AddressableNode, msg: MessageHandler, heading_level: int
@@ -140,11 +206,13 @@ class MarkdownExporter:  # pylint: disable=too-few-public-methods
             assert node.current_idx is not None
             identifier += "".join(f"[{idx}]" for idx in node.current_idx)
         name = self._node_name_sanitized(node)
+        size = node.size
 
         table_row: "OrderedDict[str, Union[str, int]]" = OrderedDict()
         table_row["Offset"] = offset
         table_row["Identifier"] = identifier
         table_row["Name"] = name
+        table_row["Size"] = f"0x{size:X}"
 
         return table_row
 
@@ -155,6 +223,7 @@ class MarkdownExporter:  # pylint: disable=too-few-public-methods
         input_files: Optional[List[str]] = None,
         rename: Optional[str] = None,
         depth: int = 0,
+        use_formulas: bool = False,
     ):
         """Export the `node` to generated Python interface file.
 
@@ -164,7 +233,10 @@ class MarkdownExporter:  # pylint: disable=too-few-public-methods
             output_path -- path to the exported file.
             rename -- name to rename the top-level to.
             depth -- depth of generation (0 means all)
+            use_formulas -- use formula-based rendering of addresses
+                reducing the amount of tables generated by the tool
         """
+        self.use_formulas = use_formulas
         # Get the top node.
         top = node.top if isinstance(node, RootNode) else node
         top_name = rename if rename is not None else node.inst_name
@@ -219,11 +291,21 @@ class MarkdownExporter:  # pylint: disable=too-few-public-methods
         for child in node.children(unroll=not_memory, skip_not_present=False):
             if isinstance(child, (AddrmapNode, RegfileNode, MemNode)):
                 output = self._add_addrmap_regfile_mem(child, msg, depth - 1)
-                member_gen += output.generated
+                if (
+                    not self.use_formulas
+                    or not child.is_array
+                    or not any(child.current_idx)
+                ):
+                    member_gen += output.generated
                 members.append(output)
             elif isinstance(child, RegNode):
                 output = self._add_reg(child, msg)
-                member_gen += output.generated
+                if (
+                    not self.use_formulas
+                    or not child.is_array
+                    or not any(child.current_idx)
+                ):
+                    member_gen += output.generated
                 members.append(output)
             else:
                 msg.warning(
