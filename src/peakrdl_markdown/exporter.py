@@ -98,9 +98,9 @@ class MarkdownExporter:  # pylint: disable=too-few-public-methods
             )
         return (
             f"```\n{'.'.join(formula_left)} = {' + '.join(formula_right)}\n```\n"
-            + markdownTable(formula)
-            .setParams(row_sep="markdown", quote=False)
-            .getMarkdown()
+            + markdown_table(formula)
+            .set_params(row_sep="markdown", quote=False)
+            .get_markdown()
         )
 
     @staticmethod
